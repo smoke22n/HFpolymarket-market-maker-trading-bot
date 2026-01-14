@@ -1,0 +1,26 @@
+[
+  {
+    "timestamp": 1768350857.7726727,
+    "datetime": "2026-01-14T00:34:17.772673",
+    "action": "ORDER_PLACED",
+    "details": {
+      "order_id": "dry_run_1768350857772665",
+      "market_id": "test_market_2",
+      "side": "sell",
+      "price": "0.55",
+      "quantity": "20"
+    }
+  },
+  {
+    "timestamp": 1768350857.7727902,
+    "datetime": "2026-01-14T00:34:17.772790",
+    "action": "ORDER_CANCELLED",
+    "details": {
+      "order_id": "dry_run_1768350857772665",
+      "market_id": "test_market_2",
+      "side": "sell",
+      "price": "0.55",
+      "quantity": "20"
+    }
+  }
+]

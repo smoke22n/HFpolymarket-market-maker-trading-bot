@@ -1,0 +1,16 @@
+{
+  "name": "polymarket-mm-bot-frontend",
+  "version": "1.0.0",
+  "description": "Frontend for the Polymarket Market Maker Bot Control Tower",
+  "main": "index.html",
+  "scripts": {
+    "start": "npx serve ./src",
+    "dev": "npx serve -l 3000 ./src"
+  },
+  "keywords": ["polymarket", "trading", "bot", "frontend"],
+  "author": "Polymarket MM Bot Team",
+  "license": "MIT",
+  "dependencies": {
+    "serve": "^14.2.1"
+  }
+}

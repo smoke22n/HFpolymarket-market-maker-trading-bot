@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket MM Bot Control Tower</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --primary-color: #4361ee;
+            --secondary-color: #3f37c9;
+            --success-color: #4cc9f0;
+            --danger-color: #f72585;
+            --warning-color: #f8961e;
+            --dark-color: #212529;
+            --light-color: #f8f9fa;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f7fb;
+            padding-top: 20px;
+            padding-bottom: 40px;
+        }
+        
+        .sidebar {
+            background: linear-gradient(180deg, var(--primary-color), var(--secondary-color));
+            color: white;
+            min-height: 100vh;
+            padding-top: 20px;
+        }
+        
+        .sidebar .nav-link {
+            color: rgba(255, 255, 255, 0.7);
+            border-radius: 0;
+            padding: 12px 20px;
+            margin: 5px 15px;
+        }
+        
+        .sidebar .nav-link:hover, .sidebar .nav-link.active {
+            color: white;
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+        
+        .card {
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            border: none;
+            margin-bottom: 20px;
+        }
+        
+        .stat-card {
+            text-align: center;
+            padding: 20px;
+        }
+        
+        .stat-card i {
+            font-size: 2.5rem;
+            margin-bottom: 15px;
+            color: var(--primary-color);
+        }
+        
+        .stat-card h3 {
+            font-size: 1.8rem;
+            margin: 10px 0;
+            color: var(--dark-color);
+        }
+        
+        .stat-card p {
+            color: #6c757d;
+            font-size: 0.9rem;
+        }
+        
+        .header-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .btn-primary {
+            background-color: var(--primary-color);
+            border-color: var(--primary-color);
+        }
+        
+        .btn-primary:hover {
+            background-color: var(--secondary-color);
+            border-color: var(--secondary-color);
+        }
+        
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 9999;
+        }
+        
+        .settings-drawer {
+            position: fixed;
+            top: 0;
+            right: -400px;
+            width: 400px;
+            height: 100%;
+            background: white;
+            box-shadow: -5px 0 15px rgba(0,0,0,0.1);
+            z-index: 1050;
+            transition: right 0.3s ease;
+            overflow-y: auto;
+        }
+        
+        .settings-drawer.open {
+            right: 0;
+        }
+        
+        .settings-header {
+            padding: 20px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1040;
+            display: none;
+        }
+        
+        .overlay.show {
+            display: block;
+        }
+        
+        .form-control, .form-select {
+            border-radius: 8px;
+            padding: 10px 15px;
+        }
+        
+        .config-section {
+            padding: 20px;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .config-section h5 {
+            margin-bottom: 15px;
+            color: var(--primary-color);
+        }
+        
+        .config-item {
+            margin-bottom: 15px;
+        }
+        
+        .config-item label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+        
+        .config-item input, .config-item select {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        .btn-save {
+            background-color: var(--success-color);
+            border: none;
+            padding: 10px 20px;
+            width: 100%;
+            margin-top: 10px;
+        }
+        
+        .btn-close-settings {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            color: #6c757d;
+        }
+        
+        .btn-close-settings:hover {
+            color: var(--danger-color);
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="row">
+            <!-- Sidebar -->
+            <div class="col-md-2 sidebar d-none d-md-block">
+                <h4 class="text-center mb-4">MM Bot Control</h4>
+                <ul class="nav flex-column">
+                    <li class="nav-item">
+                        <a class="nav-link active" href="#" id="dashboard-link">
+                            <i class="fas fa-tachometer-alt me-2"></i>Dashboard
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" id="orders-link">
+                            <i class="fas fa-list me-2"></i>Live Orders
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" id="analytics-link">
+                            <i class="fas fa-chart-line me-2"></i>Analytics
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" id="history-link">
+                            <i class="fas fa-history me-2"></i>Trade History
+                        </a>
+                    </li>
+                    <li class="nav-item mt-4">
+                        <a class="nav-link" href="#" id="settings-btn">
+                            <i class="fas fa-cog me-2"></i>Settings
+                        </a>
+                    </li>
+                </ul>
+            </div>
+            
+            <!-- Main Content -->
+            <div class="col-md-10 col-sm-12">
+                <div class="header-actions">
+                    <h2>Market Maker Dashboard</h2>
+                    <div>
+                        <button class="btn btn-outline-secondary me-2" id="refresh-btn">
+                            <i class="fas fa-sync-alt"></i> Refresh
+                        </button>
+                        <button class="btn btn-danger me-2" id="panic-sell-btn">
+                            <i class="fas fa-exclamation-triangle"></i> Panic Sell
+                        </button>
+                        <button class="btn btn-warning" id="pause-resume-btn">
+                            <i class="fas fa-pause"></i> <span id="pause-resume-text">Pause</span>
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Stats Cards -->
+                <div class="row">
+                    <div class="col-md-3 col-sm-6">
+                        <div class="card stat-card">
+                            <i class="fas fa-coins"></i>
+                            <h3 id="pnl-value">$0.00</h3>
+                            <p>PnL (24H)</p>
+                        </div>
+                    </div>
+                    <div class="col-md-3 col-sm-6">
+                        <div class="card stat-card">
+                            <i class="fas fa-balance-scale"></i>
+                            <h3 id="exposure-value">$0.00</h3>
+                            <p>Open Exposure</p>
+                        </div>
+                    </div>
+                    <div class="col-md-3 col-sm-6">
+                        <div class="card stat-card">
+                            <i class="fas fa-percentage"></i>
+                            <h3 id="win-rate-value">0%</h3>
+                            <p>Win Rate</p>
+                        </div>
+                    </div>
+                    <div class="col-md-3 col-sm-6">
+                        <div class="card stat-card">
+                            <i class="fas fa-chart-line"></i>
+                            <h3 id="total-trades-value">0</h3>
+                            <p>Total Trades</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Live Orders Section -->
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="fas fa-list me-2"></i>Live Orders</h5>
+                        <div>
+                            <button class="btn btn-sm btn-outline-secondary me-2">Refresh</button>
+                            <button class="btn btn-sm btn-outline-danger">Cancel All</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Order ID</th>
+                                        <th>Market</th>
+                                        <th>Side</th>
+                                        <th>Price</th>
+                                        <th>Size</th>
+                                        <th>Status</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="orders-table-body">
+                                    <!-- Orders will be populated here -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Market Spreads Section -->
+                <div class="card mt-4">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="fas fa-arrows-alt-h me-2"></i>Market Spreads</h5>
+                        <div>
+                            <button class="btn btn-sm btn-outline-secondary">Refresh</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Market</th>
+                                        <th>Bid Price</th>
+                                        <th>Ask Price</th>
+                                        <th>Fair Price</th>
+                                        <th>Spread Width</th>
+                                        <th>Spread (%)</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="spreads-table-body">
+                                    <!-- Spreads will be populated here -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Settings Drawer -->
+    <div class="settings-drawer" id="settings-drawer">
+        <div class="settings-header">
+            <h4><i class="fas fa-cog me-2"></i>Bot Configuration</h4>
+            <button class="btn-close-settings" id="close-settings-btn">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <div class="config-section">
+            <h5>Trading Parameters</h5>
+            <div class="config-item">
+                <label for="target-spread">Target Spread (bps)</label>
+                <input type="number" id="target-spread" step="0.01" placeholder="Enter target spread in basis points">
+                <small class="text-muted">The spread at which the bot will place orders (e.g., 20 for 0.20%)</small>
+            </div>
+            <div class="config-item">
+                <label for="order-size">Order Size ($)</label>
+                <input type="number" id="order-size" step="0.01" placeholder="Enter order size in USD">
+                <small class="text-muted">The dollar amount for each order placed</small>
+            </div>
+            <div class="config-item">
+                <label for="max-inventory">Max Inventory ($)</label>
+                <input type="number" id="max-inventory" step="0.01" placeholder="Enter maximum inventory in USD">
+                <small class="text-muted">Maximum exposure allowed in any single market</small>
+            </div>
+            <button class="btn btn-success btn-save" id="save-config-btn">
+                <i class="fas fa-save me-2"></i>Save Configuration
+            </button>
+        </div>
+    </div>
+    
+    <!-- Overlay for settings drawer -->
+    <div class="overlay" id="settings-overlay"></div>
+    
+    <!-- Toast Container -->
+    <div class="toast-container">
+        <div class="toast" id="config-toast" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="toast-header">
+                <strong class="me-auto">Configuration Update</strong>
+                <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+            <div class="toast-body" id="toast-message">
+                Configuration saved successfully!
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
