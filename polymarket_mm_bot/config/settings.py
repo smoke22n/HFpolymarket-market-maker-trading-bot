@@ -5,6 +5,10 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 from decimal import Decimal
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 @dataclass
@@ -14,7 +18,7 @@ class PolymarketConfig:
     secret_key: str
     wallet_address: str
     base_url: str = "https://clob.polymarket.com"
-    ws_url: str = "wss://clob.polymarket.com/ws"
+    ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     rate_limit_max_requests: int = 500
     rate_limit_time_window: int = 10
     heartbeat_interval: int = 30

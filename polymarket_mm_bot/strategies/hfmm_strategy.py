@@ -218,13 +218,15 @@ class HFMStrategy:
         bid_size, ask_size = self.calculate_order_sizes(market_id)
         
         # Generate orders at multiple price levels
+        # Each level is spaced by half the target spread (e.g., 10 bps apart for 20 bps spread)
+        level_spacing = self.target_spread / 2
+
         for i in range(self.num_levels):
-            # Calculate price levels with increasing depth
-            level_multiplier = Decimal('1.0') + (Decimal(str(i)) * Decimal('0.001'))  # 10 bp increments
-            
             # Calculate bid and ask prices for this level
-            level_bid_price = bid_price - (self.target_spread * level_multiplier * Decimal('0.5'))
-            level_ask_price = ask_price + (self.target_spread * level_multiplier * Decimal('0.5'))
+            # Level 0 is at bid_price/ask_price, each subsequent level is further away
+            level_offset = level_spacing * Decimal(str(i))
+            level_bid_price = bid_price - level_offset
+            level_ask_price = ask_price + level_offset
             
             # Clamp prices to valid range
             level_bid_price = max(Decimal('0'), min(Decimal('1'), level_bid_price))

@@ -20,7 +20,87 @@ from .utils.risk_manager import RiskManager
 from .utils.dry_run import DryRunMode
 from .utils.simulation_engine import SimulationEngine
 from .utils.config_manager import config_manager
+from .utils.market_discovery import fetch_markets, generate_pairs_dict, print_market_summary
 import time
+
+
+async def refresh_markets_task(
+    market_data_engine,
+    order_manager,
+    position_manager,
+    current_markets: Dict[str, str],
+    refresh_interval: int = 3600,  # 1 hour default
+    min_volume: float = 100000,
+    max_pairs: int = 10,
+    logger=None
+):
+    """
+    Background task to refresh markets periodically.
+    Cancels orders for markets that no longer meet criteria.
+    """
+    while True:
+        await asyncio.sleep(refresh_interval)
+
+        try:
+            logger.info("🔄 Refreshing market list...")
+
+            # Fetch new high-volume markets
+            new_discovered = await fetch_markets(
+                min_volume=min_volume,
+                max_markets=max_pairs,
+                min_liquidity=10000,
+                max_spread=0.20,
+            )
+
+            if not new_discovered:
+                logger.warning("⚠️ Market refresh returned no markets, keeping current list")
+                continue
+
+            new_markets = await generate_pairs_dict(min_volume=min_volume, max_pairs=max_pairs)
+
+            # Find markets to remove (in current but not in new)
+            old_tokens = set(current_markets.keys())
+            new_tokens = set(new_markets.keys())
+
+            tokens_to_remove = old_tokens - new_tokens
+            tokens_to_add = new_tokens - old_tokens
+
+            # Cancel orders for removed markets
+            if tokens_to_remove:
+                logger.info(f"🗑️ Removing {len(tokens_to_remove)} markets that no longer meet criteria")
+                for token_id in tokens_to_remove:
+                    alias = current_markets.get(token_id, token_id[:12])
+                    logger.info(f"   ❌ Removing: {alias}")
+                    # Cancel any standing orders
+                    await order_manager.cancel_orders_for_market(token_id)
+                    # Unsubscribe from market data
+                    market_data_engine.unsubscribe_from_market(token_id)
+                    # Remove from current markets dict
+                    del current_markets[token_id]
+
+            # Add new markets
+            if tokens_to_add:
+                logger.info(f"➕ Adding {len(tokens_to_add)} new high-volume markets")
+                for token_id in tokens_to_add:
+                    alias = new_markets.get(token_id, token_id[:12])
+                    logger.info(f"   ✅ Adding: {alias}")
+                    current_markets[token_id] = alias
+                    # Track position for new market (start flat)
+                    position_manager.track_position(
+                        market_id=token_id,
+                        yes_balance=Decimal('0'),
+                        no_balance=Decimal('0'),
+                        collateral_token_address="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+                        condition_id=f"condition_{alias.replace(' ', '_')}"
+                    )
+
+                # Subscribe to new markets
+                await market_data_engine.subscribe_to_markets(list(tokens_to_add))
+
+            logger.info(f"✅ Market refresh complete. Now tracking {len(current_markets)} tokens")
+
+        except Exception as e:
+            logger.error(f"💥 Error refreshing markets: {e}")
 
 
 async def main():
@@ -37,6 +117,12 @@ async def main():
                         help='Run in backtest mode (historical data replay)')
     parser.add_argument('--data', type=str,
                         help='Path to historical data file for backtesting (e.g., --data ./history/btc_2024.csv)')
+    parser.add_argument('--min-volume', type=float, default=100000,
+                        help='Minimum volume for market discovery (default: $100,000)')
+    parser.add_argument('--max-markets', type=int, default=10,
+                        help='Maximum number of markets to trade (default: 10)')
+    parser.add_argument('--refresh-interval', type=int, default=3600,
+                        help='Market refresh interval in seconds (default: 3600 = 1 hour)')
 
     args = parser.parse_args()
 
@@ -64,18 +150,16 @@ async def main():
     config = load_config()
     if operation_mode == 'dry-run':
         config.dry_run = True
-        logger.info("Operating in DRY RUN mode - connecting to live Websockets but mocking execution layer")
+        logger.info("🧪 DRY RUN MODE - Simulated trading with live market data")
     elif operation_mode == 'live':
         config.dry_run = False
-        logger.warning("OPERATING IN LIVE MODE - REAL FUNDS WILL BE USED!")
+        logger.warning("🔴 LIVE MODE - REAL FUNDS WILL BE USED!")
         if not config.api_key or not config.secret_key or not config.wallet_address:
-            logger.error("Missing required environment variables for live mode: POLYMARKET_API_KEY, POLYMARKET_SECRET_KEY, POLYMARKET_WALLET_ADDRESS")
+            logger.error("❌ Missing API credentials for live mode")
             sys.exit(1)
     elif operation_mode == 'backtest':
-        logger.info(f"Operating in BACKTEST mode - replaying historical data from {args.data or 'default historical data'}")
-        # For backtesting, we would typically use a different execution path
-        # This is a simplified implementation - in a real scenario, you'd load historical data
-        config.dry_run = True  # Backtesting would also be a form of dry run
+        logger.info(f"📜 BACKTEST MODE - Replaying historical data")
+        config.dry_run = True
 
     # Validate configuration
     if not config.dry_run and (not config.api_key or not config.secret_key or not config.wallet_address):
@@ -91,11 +175,11 @@ async def main():
     # Initialize REST client with dry run mode if enabled
     rest_client = PolymarketRestClient(credentials, config.base_url, dry_run=config.dry_run)
 
-    logger.info(f"{'DRY RUN MODE' if config.dry_run else 'LIVE TRADING MODE'} - Initializing...")
+    logger.info(f"🚀 Initializing bot...")
 
     # If in dry run mode, initialize additional components
     if config.dry_run:
-        logger.info(f"Dry run mode enabled. Logging to: {config.dry_run_log_file}")
+        logger.info(f"📝 Trade log: {config.dry_run_log_file}")
 
         # Initialize dry run mode
         dry_run_mode = DryRunMode(
@@ -132,13 +216,19 @@ async def main():
     position_manager = PositionManager(mock_api_client)
 
     # Initialize the RiskManager with safety parameters
+    # Max exposure should be higher for multi-market trading
+    max_exposure = config_manager.get_max_exposure()
+    if max_exposure < 5000:
+        max_exposure = Decimal('10000')  # Allow up to $10k exposure for multi-market
+
     risk_manager = RiskManager(
         position_manager=position_manager,
-        max_exposure=config_manager.get_max_exposure(),           # Max exposure from config
+        max_exposure=max_exposure,
         kill_switch_threshold=config_manager.get_kill_switch_threshold(),  # Loss threshold from config
         fat_finger_threshold=config_manager.get_fat_finger_threshold(),   # Price deviation from config
         starting_balance=config.starting_balance  # Use config value
     )
+    logger.info(f"🛡️ Risk Manager: max exposure ${max_exposure}, kill switch {config_manager.get_kill_switch_threshold():.0%}")
 
     # Initialize the HFMM strategy
     strategy = HFMStrategy(
@@ -149,40 +239,75 @@ async def main():
         num_levels=5
     )
 
-    # Initialize the OrderManager with a 100ms tick interval and risk manager
+    # Initialize the OrderManager with 1.5s tick interval and 10s cooldown
     order_manager = OrderManager(
         rest_client=rest_client,
-        tick_interval_ms=100,
+        tick_interval_ms=1500,  # Check every 1.5 seconds (not 100ms spam)
         risk_manager=risk_manager
     )
 
-    # Define market ID to track (this would be a real market ID from Polymarket)
-    market_id = "Will Bitcoin hit $100k?"  # Example market ID
+    # Auto-discover high-volume markets from Polymarket API
+    min_vol = args.min_volume
+    max_mkts = args.max_markets
+    logger.info(f"🔍 Discovering markets (min vol: ${min_vol:,.0f}, max: {max_mkts})...")
+    discovered_markets = await fetch_markets(
+        min_volume=min_vol,
+        max_markets=max_mkts,
+        min_liquidity=1000,     # Minimum $1k liquidity (Polymarket values are low)
+        max_spread=0.25,        # Max 25% spread
+    )
+
+    if discovered_markets:
+        await print_market_summary(discovered_markets)
+        MARKETS = await generate_pairs_dict(min_volume=min_vol, max_pairs=max_mkts)
+        logger.info(f"✅ Discovered {len(MARKETS)} token pairs from {len(discovered_markets)} markets")
+    else:
+        # Fallback to some known high-volume markets
+        logger.warning("⚠️ Market discovery failed, using fallback markets")
+        MARKETS = {
+            "19740329944962592380580142050369523795065853055987745520766432334608119837023": "Bills SB Y",
+            "20830052946262425318347897889378986218676355013257249888938222536677638197588": "Bills SB N",
+            "28946595841244317705636126646676849578876740730186646421280828201004700559420": "GTA6 $100 Y",
+            "42278252558046940014991595990628759801692726198478046188873057685686228021663": "GTA6 $100 N",
+        }
+
+    # Reverse lookup for logging
+    market_aliases = MARKETS
+
+    def get_alias(token_id: str) -> str:
+        """Get human-readable alias for a token ID"""
+        return market_aliases.get(token_id, token_id[:20] + "...")
+
+    # Track updates received
+    update_counts = {mkt_id: 0 for mkt_id in MARKETS.keys()}
 
     # Register callbacks for different types of updates
     def on_order_book_update(local_book):
-        logger.info(f"Order book updated for {local_book.market_id}")
+        update_counts[local_book.market_id] = update_counts.get(local_book.market_id, 0) + 1
+        alias = get_alias(local_book.market_id)
         best_bid = local_book.get_best_bid()
         best_ask = local_book.get_best_ask()
         if best_bid and best_ask:
-            logger.info(f"Best Bid: {best_bid.price} @ {best_bid.size}, Best Ask: {best_ask.price} @ {best_ask.size}")
-
-            # Orders will be managed by the event loop, so we don't place them here directly
+            # Only log first update per market and then every 100th
+            count = update_counts[local_book.market_id]
+            if count == 1 or count % 100 == 0:
+                logger.info(f"📈 [{alias}] Bid: {best_bid.price:.3f} | Ask: {best_ask.price:.3f} (update #{count})")
 
             # If in dry run mode, notify simulation engine of order book update
             if config.dry_run:
-                simulation_engine.subscribe_to_market(market_id, local_book)
+                simulation_engine.subscribe_to_market(local_book.market_id, local_book)
 
-    def on_mid_price_update(mid_price):
-        logger.info(f"Mid-price updated: {mid_price}")
+    def on_mid_price_update(mid_price, market_id):
+        pass  # Reduce noise - mid price shown in main loop
 
-    def on_spread_update(spread):
-        logger.info(f"Spread updated: {spread}")
+    def on_spread_update(spread, market_id):
+        pass  # Reduce noise - spread shown in main loop
 
-    # Register the callbacks
-    market_data_engine.register_update_callback(market_id, on_order_book_update)
-    market_data_engine.register_mid_price_callback(market_id, on_mid_price_update)
-    market_data_engine.register_spread_callback(market_id, on_spread_update)
+    # Register callbacks for all markets
+    for market_id in MARKETS.keys():
+        market_data_engine.register_update_callback(market_id, on_order_book_update)
+        market_data_engine.register_mid_price_callback(market_id, lambda mp, mid=market_id: on_mid_price_update(mp, mid))
+        market_data_engine.register_spread_callback(market_id, lambda sp, mid=market_id: on_spread_update(sp, mid))
 
     try:
         # Start the market data ingestion engine
@@ -198,30 +323,52 @@ async def main():
         await order_manager.start()
         logger.info("Order manager started")
 
-        # Subscribe to the market
-        market_data_engine.subscribe_to_market(market_id)
-        logger.info(f"Subscribed to market: {market_id}")
+        # Subscribe to all markets at once (Polymarket requires batch subscription)
+        market_ids = list(MARKETS.keys())
+        await market_data_engine.subscribe_to_markets(market_ids)
 
-        # Simulate adding a position to demonstrate the strategy
-        position_manager.track_position(
-            market_id=market_id,
-            yes_balance=Decimal('500'),
-            no_balance=Decimal('300'),
-            collateral_token_address="0x...",
-            condition_id="test_condition"
-        )
-        logger.info("Added sample position for demonstration")
+        for market_id, alias in MARKETS.items():
+            logger.info(f"📊 Subscribed: {alias}")
+            # Add minimal starting positions for demonstration (starts flat)
+            position_manager.track_position(
+                market_id=market_id,
+                yes_balance=Decimal('0'),  # Start with no position
+                no_balance=Decimal('0'),
+                collateral_token_address="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+                condition_id=f"condition_{alias.replace(' ', '_')}"
+            )
+        logger.info(f"✅ Subscribed to {len(MARKETS)} markets")
 
         # Start the main event loop for order management
         event_loop_task = asyncio.create_task(
             order_manager.run_event_loop(strategy, market_data_engine)
         )
 
+        # Start the market refresh task
+        refresh_secs = args.refresh_interval
+        market_refresh_task = asyncio.create_task(
+            refresh_markets_task(
+                market_data_engine=market_data_engine,
+                order_manager=order_manager,
+                position_manager=position_manager,
+                current_markets=MARKETS,
+                refresh_interval=refresh_secs,
+                min_volume=min_vol,
+                max_pairs=max_mkts,
+                logger=logger
+            )
+        )
+        logger.info(f"⏰ Market refresh task started (every {refresh_secs//60} min)")
+
         # Keep the bot running
         last_pnl_snapshot_time = time.time()
         last_config_check_time = time.time()
+        last_status_time = time.time()
+        message_count = 0
+
         while True:
             await asyncio.sleep(1)
+            current_time = time.time()
 
             # Check if the risk manager indicates immediate shutdown
             if risk_manager.should_shutdown_immediately():
@@ -229,8 +376,7 @@ async def main():
                 break
 
             # Check for configuration updates every 30 seconds
-            current_time = time.time()
-            if current_time - last_config_check_time >= 30:  # 30 seconds
+            if current_time - last_config_check_time >= 30:
                 try:
                     # Check if target spread has been updated
                     new_target_spread = config_manager.get_target_spread()
@@ -269,53 +415,65 @@ async def main():
                 except Exception as e:
                     logger.error(f"Error checking for configuration updates: {str(e)}")
 
-            # Record PnL snapshot every minute
-            if current_time - last_pnl_snapshot_time >= 60:  # 60 seconds = 1 minute
-                try:
-                    # Calculate current balances and PnL
-                    # For now, using mock values - in a real implementation these would come from the exchange
-                    total_usdc = Decimal('10000')  # Placeholder - would come from exchange
-                    total_positions_value = Decimal('500')  # Placeholder - would come from position manager
+            # Heartbeat status every 10 seconds
+            if current_time - last_status_time >= 10:
+                # Get real balances from dry run mode
+                if config.dry_run and hasattr(rest_client, 'dry_run_mode'):
+                    balances = rest_client.dry_run_mode.get_balances()
+                    usdc = balances.get('usdc', config.starting_balance)
+                    pnl_stats = rest_client.dry_run_mode.get_total_pnl()
+                    total_trades = pnl_stats.get('total_trades', 0)
+                    realized_pnl = pnl_stats.get('realized_pnl', 0)
+                else:
+                    usdc = config.starting_balance
+                    total_trades = 0
+                    realized_pnl = 0
 
-                    # Calculate cumulative PnL (starting balance - current total value)
-                    current_total_value = total_usdc + total_positions_value
-                    cumulative_pnl = current_total_value - config.starting_balance
+                # Count markets with data
+                markets_with_data = 0
+                total_orders = 0
+                for mkt_id, alias in MARKETS.items():
+                    order_count = await order_manager.get_order_count_for_market(mkt_id)
+                    total_orders += order_count
+                    if market_data_engine.get_current_mid_price(mkt_id):
+                        markets_with_data += 1
 
-                    # Record PnL snapshot
-                    risk_manager.record_pnl_snapshot(
-                        total_usdc=total_usdc,
-                        total_positions_value=total_positions_value,
-                        cumulative_pnl=cumulative_pnl
-                    )
+                # Show status with PnL
+                ws_status = "🟢" if market_data_engine.connection_manager.ws_client and market_data_engine.connection_manager.ws_client.is_connected else "🔴"
+                pnl_emoji = "📈" if realized_pnl >= 0 else "📉"
+                logger.info(f"💓 {ws_status} WS | 📊 {markets_with_data}/{len(MARKETS)} mkts | 💼 {total_orders} orders | 🔄 {total_trades} fills | {pnl_emoji} ${realized_pnl:+.2f} PnL | 💰 ${usdc:.2f}")
 
-                    logger.info(f"PnL snapshot recorded: USDC=${total_usdc}, Positions=${total_positions_value}, PnL=${cumulative_pnl}")
-                    last_pnl_snapshot_time = current_time
-                except Exception as e:
-                    logger.error(f"Error recording PnL snapshot: {str(e)}")
+                # Show per-market stats every 30 seconds
+                if int(current_time) % 30 < 10 and config.dry_run and hasattr(rest_client, 'dry_run_mode'):
+                    for mkt_id, alias in MARKETS.items():
+                        mid_price = market_data_engine.get_current_mid_price(mkt_id)
+                        spread = market_data_engine.get_current_spread(mkt_id)
+                        if mid_price:
+                            stats = rest_client.dry_run_mode.get_market_stats(mkt_id)
+                            trades = stats.get('trades', 0)
+                            mkt_pnl = stats.get('pnl', 0)
+                            spread_bps = float(spread * 10000) if spread else 0
+                            logger.info(f"   📌 {alias}: Mid {mid_price:.4f} | Spread {spread_bps:.0f}bps | Trades {trades} | PnL ${mkt_pnl:+.2f}")
 
-            # You can access the current state at any time:
-            current_mid_price = market_data_engine.get_current_mid_price(market_id)
-            current_spread = market_data_engine.get_current_spread(market_id)
-
-            if current_mid_price:
-                logger.info(f"Current mid-price from external access: {current_mid_price}")
-            if current_spread:
-                logger.info(f"Current spread from external access: {current_spread}")
-
-            # Log order status
-            order_count = await order_manager.get_order_count_for_market(market_id)
-            logger.info(f"Active orders for {market_id}: {order_count}")
+                last_status_time = current_time
 
     except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        logger.info("👋 Shutting down...")
     except Exception as e:
-        logger.error(f"Error in main loop: {e}")
+        logger.error(f"💥 Error in main loop: {e}")
     finally:
-        # Cancel the event loop task
+        # Cancel background tasks
         if 'event_loop_task' in locals():
             event_loop_task.cancel()
             try:
                 await event_loop_task
+            except asyncio.CancelledError:
+                pass
+
+        if 'market_refresh_task' in locals():
+            market_refresh_task.cancel()
+            try:
+                await market_refresh_task
             except asyncio.CancelledError:
                 pass
 

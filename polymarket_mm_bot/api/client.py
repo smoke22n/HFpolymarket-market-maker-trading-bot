@@ -159,91 +159,84 @@ class PolymarketWsClient:
     """
     WebSocket client for streaming Orderbook (L2) data from Polymarket
     """
-    
-    def __init__(self, credentials: Credentials, ws_url: str = "wss://clob.polymarket.com/ws"):
+
+    def __init__(self, credentials: Credentials, ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"):
         self.credentials = credentials
         self.ws_url = ws_url
         self.websocket = None
         self.is_connected = False
         self.handlers = {}
-        
+
     def register_handler(self, event_type: str, handler: Callable[[Dict], Awaitable[None]]):
         """Register a handler for specific event types"""
         self.handlers[event_type] = handler
-        
+
     async def connect(self):
-        """Connect to the WebSocket server"""
+        """Connect to the WebSocket server (market channel is public, no auth needed)"""
         self.websocket = await websockets.connect(self.ws_url)
         self.is_connected = True
-        
-        # Authenticate
-        auth_message = {
-            "type": "AUTH",
-            "API-KEY": self.credentials.api_key,
-            "SIGNATURE": self._generate_signature(),
-            "TIMESTAMP": str(int(time.time() * 1000)),
-            "PASSPHRASE": ""  # May be required depending on API
-        }
-        
-        await self.websocket.send(json.dumps(auth_message))
-        
+
         # Start listening for messages
         asyncio.create_task(self._listen())
-        
-    def _generate_signature(self) -> str:
-        """Generate signature for WebSocket authentication"""
-        timestamp = str(int(time.time() * 1000))
-        message = f"websocket_auth_{timestamp}"
-        signature = hmac.new(
-            self.credentials.secret_key.encode(),
-            message.encode(),
-            hashlib.sha256
-        ).hexdigest()
-        return signature
-    
-    async def subscribe_to_orderbook(self, market_ids: list):
-        """Subscribe to orderbook updates for specific markets"""
+
+    async def subscribe_to_orderbook(self, asset_ids: list):
+        """Subscribe to orderbook updates for specific assets (token IDs)"""
         subscription_message = {
-            "type": "SUBSCRIBE",
-            "channel": "l2_book",
-            "market_ids": market_ids
+            "assets_ids": asset_ids,
+            "type": "market"
         }
         await self.websocket.send(json.dumps(subscription_message))
-    
-    async def unsubscribe_from_orderbook(self, market_ids: list):
-        """Unsubscribe from orderbook updates for specific markets"""
-        subscription_message = {
-            "type": "UNSUBSCRIBE",
-            "channel": "l2_book",
-            "market_ids": market_ids
-        }
-        await self.websocket.send(json.dumps(subscription_message))
+
+    async def unsubscribe_from_orderbook(self, asset_ids: list):
+        """Unsubscribe from orderbook updates for specific assets"""
+        # Note: Polymarket may not support explicit unsubscribe,
+        # reconnecting without the asset_id is the typical approach
+        pass
     
     async def _listen(self):
         """Listen for incoming WebSocket messages"""
         try:
             async for message in self.websocket:
-                data = json.loads(message)
-                await self._handle_message(data)
-        except websockets.exceptions.ConnectionClosed:
-            print("WebSocket connection closed")
+                # Skip empty messages or pings
+                if not message or message.strip() == "":
+                    continue
+                try:
+                    data = json.loads(message)
+                    # Polymarket sends arrays of messages
+                    if isinstance(data, list):
+                        for item in data:
+                            await self._handle_message(item)
+                    else:
+                        await self._handle_message(data)
+                except json.JSONDecodeError:
+                    # Skip non-JSON messages (pings, etc)
+                    continue
+        except websockets.exceptions.ConnectionClosed as e:
+            print(f"❌ WebSocket closed: code={e.code} reason={e.reason}")
             self.is_connected = False
         except Exception as e:
-            print(f"Error in WebSocket listener: {e}")
+            print(f"❌ WebSocket error: {e}")
             self.is_connected = False
-    
+
     async def _handle_message(self, message: Dict[str, Any]):
         """Handle incoming WebSocket messages"""
-        msg_type = message.get("type", "unknown")
-        
-        if msg_type in self.handlers:
-            await self.handlers[msg_type](message)
-        elif "l2_book" in message.get("channel", ""):
-            # Handle orderbook updates
+        # Polymarket orderbook data has bids/asks directly
+        if "bids" in message and "asks" in message:
             if "orderbook_update" in self.handlers:
                 await self.handlers["orderbook_update"](message)
-        else:
-            print(f"Unhandled message type: {msg_type}, data: {message}")
+            return
+
+        # Handle event_type based messages
+        event_type = message.get("event_type", message.get("type", "unknown"))
+
+        if event_type in self.handlers:
+            await self.handlers[event_type](message)
+        elif event_type == "price_change":
+            if "orderbook_update" in self.handlers:
+                await self.handlers["orderbook_update"](message)
+        elif event_type == "last_trade_price":
+            if "last_trade_price" in self.handlers:
+                await self.handlers["last_trade_price"](message)
     
     async def disconnect(self):
         """Disconnect from the WebSocket server"""
