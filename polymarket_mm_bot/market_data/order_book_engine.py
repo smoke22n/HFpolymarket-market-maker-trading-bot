@@ -156,7 +156,7 @@ class LocalOrderBook:
 class MarketDataIngestionEngine:
     """Main engine for subscribing to market data and maintaining local order book mirrors"""
     
-    def __init__(self, credentials: Credentials, ws_url: str = "wss://clob.polymarket.com/ws"):
+    def __init__(self, credentials: Credentials, ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"):
         self.credentials = credentials
         self.connection_manager = ConnectionManager(credentials, ws_url)
         self.local_order_books: Dict[str, LocalOrderBook] = {}
@@ -187,9 +187,16 @@ class MarketDataIngestionEngine:
         if market_id not in self.local_order_books:
             self.local_order_books[market_id] = LocalOrderBook(market_id)
             self.delta_buffer[market_id] = deque(maxlen=1000)
-            
-        # Subscribe via connection manager
-        asyncio.create_task(self.connection_manager.subscribe_to_orderbook([market_id]))
+        # Note: Don't subscribe individually - use subscribe_to_markets for batch subscription
+
+    async def subscribe_to_markets(self, market_ids: list):
+        """Subscribe to multiple markets at once (required by Polymarket API)"""
+        for market_id in market_ids:
+            if market_id not in self.local_order_books:
+                self.local_order_books[market_id] = LocalOrderBook(market_id)
+                self.delta_buffer[market_id] = deque(maxlen=1000)
+        # Subscribe all at once
+        await self.connection_manager.subscribe_to_orderbook(market_ids)
         
     def unsubscribe_from_market(self, market_id: str):
         """Unsubscribe from a specific market"""
@@ -215,8 +222,11 @@ class MarketDataIngestionEngine:
         
     async def _handle_orderbook_update(self, message: Dict[str, Any]):
         """Handle incoming order book update messages"""
-        market_id = message.get('market_id')
-        if not market_id or market_id not in self.local_order_books:
+        # Polymarket uses 'asset_id' for token ID
+        market_id = message.get('asset_id') or message.get('market_id')
+        if not market_id:
+            return
+        if market_id not in self.local_order_books:
             return
             
         # Parse the update into a delta

@@ -13,7 +13,7 @@ class ConnectionManager:
     Manages WebSocket connection with heartbeat and auto-reconnect capabilities
     """
     
-    def __init__(self, credentials: Credentials, ws_url: str = "wss://clob.polymarket.com/ws"):
+    def __init__(self, credentials: Credentials, ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"):
         self.credentials = credentials
         self.ws_url = ws_url
         self.ws_client: Optional[PolymarketWsClient] = None
@@ -22,7 +22,8 @@ class ConnectionManager:
         self.reconnect_delay = 5  # seconds
         self.max_reconnect_attempts = 10
         self.current_reconnect_attempt = 0
-        
+        self._handlers = {}  # Store handlers to re-register after reconnect
+
         self.logger = logging.getLogger(__name__)
         
     async def start(self):
@@ -43,18 +44,22 @@ class ConnectionManager:
         """Attempt to connect with retry logic"""
         while self.is_running and self.current_reconnect_attempt < self.max_reconnect_attempts:
             try:
-                self.logger.info(f"Attempting to connect (attempt {self.current_reconnect_attempt + 1})")
+                self.logger.info(f"🔌 Connecting... (attempt {self.current_reconnect_attempt + 1})")
                 
                 # Create new client instance
                 self.ws_client = PolymarketWsClient(self.credentials, self.ws_url)
-                
+
+                # Re-register stored handlers on new client
+                for event_type, handler in self._handlers.items():
+                    self.ws_client.register_handler(event_type, handler)
+
                 # Connect to WebSocket
                 await self.ws_client.connect()
                 
                 # Reset reconnect attempts on successful connection
                 self.current_reconnect_attempt = 0
                 
-                self.logger.info("Connected successfully")
+                self.logger.info("✅ WebSocket connected")
                 break
                 
             except Exception as e:
@@ -105,5 +110,7 @@ class ConnectionManager:
     
     def register_handler(self, event_type: str, handler):
         """Register a handler for specific event types"""
+        # Store handler for re-registration after reconnects
+        self._handlers[event_type] = handler
         if self.ws_client:
             self.ws_client.register_handler(event_type, handler)

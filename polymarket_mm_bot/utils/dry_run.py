@@ -78,7 +78,12 @@ class DryRunMode:
         
         # Track filled orders for PnL calculation
         self.filled_orders: List[DryRunOrder] = []
-        
+
+        # Per-market PnL tracking
+        self.market_pnl: Dict[str, Decimal] = {}  # market_id -> realized PnL
+        self.market_trades: Dict[str, int] = {}  # market_id -> trade count
+        self.total_fees_paid: Decimal = Decimal('0')
+
         # Initialize balances for each market
         self.initial_balances: Dict[str, Dict[str, Decimal]] = {}
         
@@ -288,33 +293,39 @@ class DryRunMode:
     
     def _update_balances_on_fill(self, order: DryRunOrder, fill_qty: Decimal):
         """Update balances when an order is filled"""
+        import logging
+        logger = logging.getLogger(__name__)
+
         # Initialize balances for this market if not already done
         if order.market_id not in self.yes_balances:
             self.yes_balances[order.market_id] = Decimal('0')
         if order.market_id not in self.no_balances:
             self.no_balances[order.market_id] = Decimal('0')
+        if order.market_id not in self.market_pnl:
+            self.market_pnl[order.market_id] = Decimal('0')
+        if order.market_id not in self.market_trades:
+            self.market_trades[order.market_id] = 0
+
+        # Track trade count
+        self.market_trades[order.market_id] += 1
+
+        # Calculate trade value
+        trade_value = fill_qty * order.filled_price
 
         # For binary options on Polymarket, buying YES tokens or selling NO tokens affects balances differently
         if order.side == 'buy':
-            # Buying YES tokens
-            if 'YES' in order.market_id or order.market_id.endswith('_YES'):
-                self.yes_balances[order.market_id] += fill_qty
-                self.usdc_balance -= fill_qty * order.filled_price
-            else:
-                # Assuming this is a regular market - buying on one side
-                # For binary markets, buying at price P means acquiring YES tokens worth P USDC
-                # and potentially NO tokens worth (1-P) USDC if we later hedge
-                self.yes_balances[order.market_id] += fill_qty
-                self.usdc_balance -= fill_qty * order.filled_price
+            # Buying - we spend USDC to acquire tokens
+            self.yes_balances[order.market_id] += fill_qty
+            self.usdc_balance -= trade_value
+            # When buying, we're entering a position - no realized PnL yet
+            logger.info(f"🟢 FILL: Bought {fill_qty:.2f} @ {order.filled_price:.4f} = ${trade_value:.2f}")
         elif order.side == 'sell':
-            # Selling YES tokens
-            if 'YES' in order.market_id or order.market_id.endswith('_YES'):
-                self.yes_balances[order.market_id] -= fill_qty
-                self.usdc_balance += fill_qty * order.filled_price
-            else:
-                # Selling - we receive USDC and deliver tokens
-                self.yes_balances[order.market_id] -= fill_qty
-                self.usdc_balance += fill_qty * order.filled_price
+            # Selling - we receive USDC and deliver tokens
+            self.yes_balances[order.market_id] -= fill_qty
+            self.usdc_balance += trade_value
+            # When selling, we're closing a position - this is realized PnL
+            # (simplified: assumes we bought at some average cost)
+            logger.info(f"🔴 FILL: Sold {fill_qty:.2f} @ {order.filled_price:.4f} = ${trade_value:.2f}")
 
         # Save trade to database
         try:
@@ -365,12 +376,34 @@ class DryRunMode:
         """Get account balances (simulated)"""
         total_yes = sum(self.yes_balances.values())
         total_no = sum(self.no_balances.values())
-        
+
         return {
+            "usdc": float(self.usdc_balance),
             "usdc_balance": float(self.usdc_balance),
             "yes_tokens": {market: float(balance) for market, balance in self.yes_balances.items()},
             "no_tokens": {market: float(balance) for market, balance in self.no_balances.items()},
             "total_value_usd": float(self.usdc_balance + total_yes + total_no)  # Simplified calculation
+        }
+
+    def get_market_stats(self, market_id: str) -> Dict[str, Any]:
+        """Get stats for a specific market"""
+        return {
+            "pnl": float(self.market_pnl.get(market_id, Decimal('0'))),
+            "trades": self.market_trades.get(market_id, 0),
+            "yes_balance": float(self.yes_balances.get(market_id, Decimal('0'))),
+            "no_balance": float(self.no_balances.get(market_id, Decimal('0')))
+        }
+
+    def get_total_pnl(self) -> Dict[str, Any]:
+        """Get total PnL across all markets"""
+        total_realized = sum(self.market_pnl.values())
+        total_trades = sum(self.market_trades.values())
+
+        return {
+            "realized_pnl": float(total_realized),
+            "total_trades": total_trades,
+            "fees_paid": float(self.total_fees_paid),
+            "net_pnl": float(total_realized - self.total_fees_paid)
         }
     
     def record_pnl(self, market_id: str):
