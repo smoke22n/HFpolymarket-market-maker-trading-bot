@@ -32,6 +32,8 @@ async def refresh_markets_task(
     refresh_interval: int = 3600,  # 1 hour default
     min_volume: float = 100000,
     max_pairs: int = 10,
+    only_new: bool = False,
+    max_age_days: int = 0,
     logger=None
 ):
     """
@@ -44,19 +46,26 @@ async def refresh_markets_task(
         try:
             logger.info("🔄 Refreshing market list...")
 
-            # Fetch new high-volume markets
+            # Fetch new high-volume markets with same filters as initial discovery
             new_discovered = await fetch_markets(
                 min_volume=min_volume,
                 max_markets=max_pairs,
-                min_liquidity=10000,
-                max_spread=0.20,
+                min_liquidity=1000,
+                max_spread=0.25,
+                only_new=only_new,
+                max_age_days=max_age_days,
             )
 
             if not new_discovered:
                 logger.warning("⚠️ Market refresh returned no markets, keeping current list")
                 continue
 
-            new_markets = await generate_pairs_dict(min_volume=min_volume, max_pairs=max_pairs)
+            new_markets = await generate_pairs_dict(
+                min_volume=min_volume,
+                max_pairs=max_pairs,
+                only_new=only_new,
+                max_age_days=max_age_days,
+            )
 
             # Find markets to remove (in current but not in new)
             old_tokens = set(current_markets.keys())
@@ -123,6 +132,10 @@ async def main():
                         help='Maximum number of markets to trade (default: 10)')
     parser.add_argument('--refresh-interval', type=int, default=3600,
                         help='Market refresh interval in seconds (default: 3600 = 1 hour)')
+    parser.add_argument('--only-new', action='store_true',
+                        help='Only trade markets marked as "new" by Polymarket')
+    parser.add_argument('--max-age-days', type=int, default=0,
+                        help='Only trade markets created within N days (0 = no filter)')
 
     args = parser.parse_args()
 
@@ -249,17 +262,33 @@ async def main():
     # Auto-discover high-volume markets from Polymarket API
     min_vol = args.min_volume
     max_mkts = args.max_markets
-    logger.info(f"🔍 Discovering markets (min vol: ${min_vol:,.0f}, max: {max_mkts})...")
+    only_new = args.only_new
+    max_age = args.max_age_days
+
+    filter_info = f"min vol: ${min_vol:,.0f}, max: {max_mkts}"
+    if only_new:
+        filter_info += ", only NEW markets"
+    if max_age > 0:
+        filter_info += f", created within {max_age}d"
+    logger.info(f"🔍 Discovering markets ({filter_info})...")
+
     discovered_markets = await fetch_markets(
         min_volume=min_vol,
         max_markets=max_mkts,
         min_liquidity=1000,     # Minimum $1k liquidity (Polymarket values are low)
         max_spread=0.25,        # Max 25% spread
+        only_new=only_new,
+        max_age_days=max_age,
     )
 
     if discovered_markets:
         await print_market_summary(discovered_markets)
-        MARKETS = await generate_pairs_dict(min_volume=min_vol, max_pairs=max_mkts)
+        MARKETS = await generate_pairs_dict(
+            min_volume=min_vol,
+            max_pairs=max_mkts,
+            only_new=only_new,
+            max_age_days=max_age,
+        )
         logger.info(f"✅ Discovered {len(MARKETS)} token pairs from {len(discovered_markets)} markets")
     else:
         # Fallback to some known high-volume markets
@@ -355,6 +384,8 @@ async def main():
                 refresh_interval=refresh_secs,
                 min_volume=min_vol,
                 max_pairs=max_mkts,
+                only_new=only_new,
+                max_age_days=max_age,
                 logger=logger
             )
         )

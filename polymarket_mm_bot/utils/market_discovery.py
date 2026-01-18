@@ -45,6 +45,8 @@ async def fetch_markets(
     exclude_closed: bool = True,
     min_liquidity: float = 1000,  # Lowered - Polymarket liquidity values are smaller
     max_spread: float = 0.20,  # 20% max spread
+    only_new: bool = False,  # Only include markets marked as "new"
+    max_age_days: int = 0,  # Only include markets created within N days (0 = no filter)
 ) -> List[DiscoveredMarket]:
     """
     Fetch high-volume markets from Polymarket API.
@@ -55,10 +57,13 @@ async def fetch_markets(
         exclude_closed: Whether to exclude closed markets
         min_liquidity: Minimum liquidity requirement
         max_spread: Maximum bid-ask spread (0.20 = 20%)
+        only_new: Only include markets marked as "new" by Polymarket
+        max_age_days: Only include markets created within N days (0 = no filter)
 
     Returns:
         List of DiscoveredMarket objects sorted by volume
     """
+    from datetime import datetime, timedelta
     markets = []
 
     try:
@@ -82,6 +87,23 @@ async def fetch_markets(
                         # Skip if not accepting orders
                         if not market.get("acceptingOrders", False):
                             continue
+
+                        # Filter by "new" flag if requested
+                        if only_new and not market.get("new", False):
+                            continue
+
+                        # Filter by age if requested
+                        if max_age_days > 0:
+                            created_at = market.get("createdAt", "")
+                            if created_at:
+                                try:
+                                    # Parse date (format: 2025-01-05T...)
+                                    created_date = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                                    cutoff_date = datetime.now(created_date.tzinfo) - timedelta(days=max_age_days)
+                                    if created_date < cutoff_date:
+                                        continue
+                                except (ValueError, TypeError):
+                                    pass  # Skip date filter if parsing fails
 
                         # Extract token IDs - API returns JSON string, not list
                         tokens_raw = market.get("clobTokenIds", "[]")
@@ -172,6 +194,8 @@ async def generate_pairs_dict(
     min_volume: float = 100000,
     max_pairs: int = 10,
     include_both_sides: bool = True,
+    only_new: bool = False,
+    max_age_days: int = 0,
 ) -> Dict[str, str]:
     """
     Generate a MARKETS dict for the bot with highest volume pairs.
@@ -180,6 +204,8 @@ async def generate_pairs_dict(
         min_volume: Minimum volume filter
         max_pairs: Maximum number of market pairs (YES/NO count as 1 pair)
         include_both_sides: Whether to include both YES and NO tokens
+        only_new: Only include markets marked as "new"
+        max_age_days: Only include markets created within N days
 
     Returns:
         Dict mapping token_id -> short alias
@@ -187,6 +213,8 @@ async def generate_pairs_dict(
     markets = await fetch_markets(
         min_volume=min_volume,
         max_markets=max_pairs,
+        only_new=only_new,
+        max_age_days=max_age_days,
     )
 
     pairs = {}
